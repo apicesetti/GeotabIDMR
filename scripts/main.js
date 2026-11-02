@@ -741,8 +741,8 @@ geotab.addin.movimientos = function () {
                 return '<li><span class="mv-badge mv-state mv-state-' + c.state + '">' + label[c.state] + '</span>' +
                     '<div><strong>' + esc(c.title) + '</strong>' + esc(c.text) + '</div></li>';
             }).join('') + '</ul>' +
-            '<p class="mv-foot">Consultado: ' + esc(fmtDateTime(new Date().toISOString())) + '.' +
-            (camera ? ' No incluye el estado de la cámara.' : '') + '</p>';
+            '<p class="mv-foot">Consultado: ' + esc(fmtDateTime(new Date().toISOString())) +
+            (camera ? ' · No incluye el estado de la cámara.' : '') + '</p>';
     }
 
     // ------------------------------------------------------------------
