@@ -1,0 +1,16 @@
+{
+  "name": "Movimientos de equipos",
+  "supportEmail": "soporte@cesetti.com.ar",
+  "version": "1.0.0",
+  "items": [
+    {
+      "url": "https://apicesetti.github.io/GeotabIDMR/movimientos.html",
+      "path": "ActivityLink/",
+      "menuName": {
+        "es": "Movimientos de equipos",
+        "en": "Device movements"
+      },
+      "svgIcon": "https://apicesetti.github.io/GeotabIDMR/images/icon.svg"
+    }
+  ]
+}

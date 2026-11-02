@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Movimientos de equipos</title>
+    <link rel="stylesheet" href="styles/main.css">
+    <script src="scripts/main.js"></script>
+</head>
+<body>
+<div id="movimientos" class="mv">
+    <header class="mv-header">
+        <div>
+            <h1>Movimientos de equipos</h1>
+            <p class="mv-sub">Registro de instalaciones, desinstalaciones y reemplazos</p>
+        </div>
+        <nav class="mv-tabs" role="tablist">
+            <button class="mv-tab is-active" data-tab="install" role="tab">Instalación</button>
+            <button class="mv-tab" data-tab="change" role="tab">Desinstalación / Reemplazo</button>
+            <button class="mv-tab" data-tab="history" role="tab">Historial</button>
+        </nav>
+    </header>
+
+    <div id="mv-msg" class="mv-msg" role="status" hidden></div>
+
+    <!-- ============ INSTALACIÓN ============ -->
+    <section id="mv-tab-install" class="mv-panel">
+        <form id="mv-install" class="mv-form" novalidate autocomplete="off">
+            <fieldset>
+                <legend>Vehículo</legend>
+                <div class="mv-grid">
+                    <label>Patente *<input name="plate" maxlength="15" required></label>
+                    <label>Número de chasis *<input name="chassis" maxlength="30" required></label>
+                    <label>Marca del vehículo *<input name="brand" maxlength="50" required></label>
+                    <label>Modelo del vehículo *<input name="model" maxlength="50" required></label>
+                    <label>Odómetro al instalar (km) *<input name="odometer" type="number" min="0" step="1" inputmode="numeric" required></label>
+                    <label>Fecha de instalación *<input name="date" type="date" required></label>
+                </div>
+            </fieldset>
+            <fieldset>
+                <legend>Equipo</legend>
+                <div class="mv-grid">
+                    <label>Número de serie de GO *<input name="goSerial" maxlength="12" placeholder="12 caracteres" required></label>
+                    <label>Tipo de arnés instalado *<select name="harness" class="mv-harness" required></select></label>
+                    <label>Marca y modelo de cámara<select name="cameraModel" class="mv-camera"></select></label>
+                    <label>Número de serie de cámara<input name="cameraSerial" maxlength="30" placeholder="Elegí primero marca y modelo" disabled></label>
+                </div>
+            </fieldset>
+            <div class="mv-actions">
+                <button type="submit" class="mv-btn">Registrar instalación</button>
+                <button type="button" id="mv-install-clear" class="mv-btn mv-btn-ghost">Limpiar</button>
+            </div>
+        </form>
+    </section>
+
+    <!-- ============ DESINSTALACIÓN / REEMPLAZO ============ -->
+    <section id="mv-tab-change" class="mv-panel" hidden>
+        <form id="mv-search" class="mv-toolbar" autocomplete="off">
+            <input id="mv-search-text" type="search" placeholder="Patente o número de serie de GO" aria-label="Patente o número de serie de GO">
+            <button type="submit" class="mv-btn">Buscar</button>
+        </form>
+        <div id="mv-results"></div>
+        <div id="mv-vehicle"></div>
+    </section>
+
+    <!-- ============ HISTORIAL ============ -->
+    <section id="mv-tab-history" class="mv-panel" hidden>
+        <div class="mv-toolbar">
+            <input id="mv-h-text" type="search" placeholder="Patente, serie o chasis" aria-label="Buscar en el historial">
+            <select id="mv-h-type" aria-label="Tipo de movimiento">
+                <option value="">Todos los tipos</option>
+                <option value="instalacion">Instalación</option>
+                <option value="desinstalacion">Desinstalación</option>
+                <option value="reemplazo">Reemplazo</option>
+            </select>
+            <label class="mv-lbl">Desde <input id="mv-h-from" type="date"></label>
+            <label class="mv-lbl">Hasta <input id="mv-h-to" type="date"></label>
+            <label class="mv-lbl"><input id="mv-h-void" type="checkbox"> Incluir anulados</label>
+            <span class="mv-spacer"></span>
+            <button id="mv-h-export" type="button" class="mv-btn mv-btn-ghost">Exportar CSV</button>
+        </div>
+        <div class="mv-table-wrap">
+            <table class="mv-table">
+                <thead>
+                <tr>
+                    <th>Fecha</th><th>Movimiento</th><th>Patente</th><th>Serie GO</th>
+                    <th>Detalle</th><th>Odómetro</th><th>Registrado por</th><th></th>
+                </tr>
+                </thead>
+                <tbody id="mv-history"></tbody>
+            </table>
+        </div>
+        <p id="mv-history-empty" class="mv-empty" hidden>No hay movimientos para mostrar.</p>
+        <p id="mv-history-count" class="mv-foot"></p>
+    </section>
+
+    <!-- ============ ANULAR ============ -->
+    <div id="mv-modal" class="mv-modal" hidden>
+        <form id="mv-void" novalidate class="mv-modal-box" role="dialog" aria-modal="true" aria-labelledby="mv-void-title">
+            <h2 id="mv-void-title">Anular movimiento</h2>
+            <p id="mv-void-desc" class="mv-muted"></p>
+            <label>Motivo *<textarea name="reason" rows="3" maxlength="300" required></textarea></label>
+            <div class="mv-actions">
+                <button type="submit" class="mv-btn mv-btn-danger">Anular</button>
+                <button type="button" id="mv-void-cancel" class="mv-btn mv-btn-ghost">Cancelar</button>
+            </div>
+        </form>
+    </div>
+</div>
+</body>
+</html>
