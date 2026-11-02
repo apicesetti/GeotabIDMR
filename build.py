@@ -16,7 +16,7 @@ BASE_URL = (sys.argv[1] if len(sys.argv) > 1
 config = {
     "name": "Movimientos de equipos",
     "supportEmail": "soporte@cesetti.com.ar",
-    "version": "1.2.0",
+    "version": "2.0.0",
     "items": [
         {
             "url": BASE_URL + "/movimientos.html",

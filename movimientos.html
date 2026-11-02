@@ -17,6 +17,7 @@
         <nav class="mv-tabs" role="tablist">
             <button class="mv-tab is-active" data-tab="install" role="tab">Instalación</button>
             <button class="mv-tab" data-tab="change" role="tab">Desinstalación / Reemplazo</button>
+            <button class="mv-tab" data-tab="vehicles" role="tab">Vehículos</button>
             <button class="mv-tab" data-tab="history" role="tab">Historial</button>
         </nav>
     </header>
@@ -28,13 +29,15 @@
         <form id="mv-install" class="mv-form" novalidate autocomplete="off">
             <fieldset>
                 <legend>Vehículo</legend>
+                <div id="mv-plate-note" class="mv-msg" hidden></div>
                 <div class="mv-grid">
                     <label>Patente *<input name="plate" maxlength="15" required></label>
                     <label>Número de chasis *<input name="chassis" maxlength="30" required></label>
                     <label>Marca del vehículo *<input name="brand" maxlength="50" required></label>
                     <label>Modelo del vehículo *<input name="model" maxlength="50" required></label>
-                    <label>Odómetro al instalar (km) *<input name="odometer" type="number" min="0" step="1" inputmode="numeric" required></label>
+                    <label>Odómetro al instalar (km) *<input name="odometer" type="number" min="0" step="1" inputmode="numeric" required><span id="mv-odo-hint" class="mv-hint" hidden></span></label>
                     <label>Fecha de instalación *<input name="date" type="date" required></label>
+                    <label data-group-field>Grupo en MyGeotab *<select name="group" required></select></label>
                 </div>
             </fieldset>
             <fieldset>
@@ -61,6 +64,33 @@
         </form>
         <div id="mv-results"></div>
         <div id="mv-vehicle"></div>
+    </section>
+
+    <!-- ============ VEHÍCULOS ============ -->
+    <section id="mv-tab-vehicles" class="mv-panel" hidden>
+        <div class="mv-toolbar">
+            <input id="mv-v-text" type="search" placeholder="Vehículo, patente o serie" aria-label="Buscar vehículo">
+            <select id="mv-v-state" aria-label="Estado">
+                <option value="">Todos los estados</option>
+                <option value="active">Activos</option>
+                <option value="archived">Archivados</option>
+            </select>
+            <span class="mv-spacer"></span>
+            <button id="mv-v-export" type="button" class="mv-btn mv-btn-ghost">Exportar CSV</button>
+        </div>
+        <div class="mv-table-wrap">
+            <table class="mv-table">
+                <thead>
+                <tr>
+                    <th>Vehículo</th><th>Patente</th><th>Serie GO</th><th>Primera instalación</th>
+                    <th>Origen de la fecha</th><th>Último movimiento</th><th>Estado</th>
+                </tr>
+                </thead>
+                <tbody id="mv-vehicles"></tbody>
+            </table>
+        </div>
+        <p id="mv-vehicles-empty" class="mv-empty" hidden>No hay vehículos para mostrar.</p>
+        <p id="mv-vehicles-count" class="mv-foot"></p>
     </section>
 
     <!-- ============ HISTORIAL ============ -->
@@ -93,6 +123,18 @@
         <p id="mv-history-empty" class="mv-empty" hidden>No hay movimientos para mostrar.</p>
         <p id="mv-history-count" class="mv-foot"></p>
     </section>
+
+    <!-- ============ CONFIRMAR ============ -->
+    <div id="mv-confirm" class="mv-modal" hidden>
+        <div class="mv-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="mv-confirm-title">
+            <h2 id="mv-confirm-title"></h2>
+            <p id="mv-confirm-text"></p>
+            <div class="mv-actions">
+                <button type="button" id="mv-confirm-ok" class="mv-btn"></button>
+                <button type="button" id="mv-confirm-cancel" class="mv-btn mv-btn-ghost">Cancelar</button>
+            </div>
+        </div>
+    </div>
 
     <!-- ============ COMUNICACIÓN ============ -->
     <div id="mv-comm" class="mv-modal" hidden>

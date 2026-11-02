@@ -1,7 +1,8 @@
 /**
  * Movimientos de equipos — add-in MyGeotab.
  * Registra instalaciones, desinstalaciones y reemplazos declarados por el cliente.
- * Solo escribe en AddInData (addInId fijo): nunca modifica Device.
+ * Cada movimiento se aplica en Device (alta, reactivación, cambio de GO o archivo)
+ * y queda registrado en AddInData (addInId fijo). Nunca elimina vehículos.
  */
 geotab.addin.movimientos = function () {
     'use strict';
@@ -13,6 +14,9 @@ geotab.addin.movimientos = function () {
     var TYPE_LABEL = { instalacion: 'Instalación', desinstalacion: 'Desinstalación', reemplazo: 'Reemplazo' };
     var REMOVED_LABEL = { go: 'Equipo GO', go_camara: 'Equipo GO y cámara', camara: 'Solo cámara' };
     var MAX_KM = 9999999;
+    var MAX_DATE = '2050-01-01T00:00:00.000Z';
+    var GO_TYPES = { G7: 'GO7', G8: 'GO8', G9: 'GO9', GA: 'GO9B' };
+    var GEOTAB_LABEL = { created: 'vehículo creado', reactivated: 'vehículo reactivado', assigned: 'GO asignado', serial: 'GO actualizado', archived: 'vehículo archivado' };
     var ADMIN_SECURITY_ID = 'GroupEverythingSecurityId';
 
     var api, root;
@@ -23,7 +27,9 @@ geotab.addin.movimientos = function () {
     var selected = null;        // vehículo elegido en Desinstalación / Reemplazo
     var selectToken = 0;
     var loadToken = 0;
-    var warnedInstall = null;   // firma del formulario ya advertido por duplicado
+    var groups = [];
+    var confirmResolve = null;
+    var odoToken = 0;
     var voidTarget = null;
     var commTarget = null;
     var commToken = 0;
@@ -123,16 +129,25 @@ geotab.addin.movimientos = function () {
         return Promise.all([
             call('Get', {
                 typeName: 'Device',
-                propertySelector: { fields: ['id', 'name', 'serialNumber', 'licensePlate', 'vehicleIdentificationNumber', 'activeTo'] }
+                propertySelector: { fields: ['id', 'name', 'serialNumber', 'licensePlate', 'vehicleIdentificationNumber', 'activeFrom', 'activeTo'] }
             }),
             call('Get', { typeName: 'AddInData', search: { addInId: ADDIN_ID } }),
-            loadAdmin()
+            loadAdmin(),
+            call('Get', { typeName: 'Group', propertySelector: { fields: ['id', 'name'] } }).catch(function () { return []; })
         ]).then(function (res) {
             if (token !== loadToken) { return; }
             devices = res[0] || [];
             records = (res[1] || []).filter(function (r) { return r.details && r.details.type === RECORD_TYPE; });
+            groups = (res[3] || []).filter(function (g) {
+                return g.name && (g.id === 'GroupCompanyId' || !/^Group/.test(g.id));
+            }).sort(function (a, b) { return a.name.localeCompare(b.name, 'es'); });
+            renderGroups();
             renderHistory();
-            if (selected) { renderVehicle(); }
+            renderVehicles();
+            if (selected) {
+                selected.device = devices.filter(function (d) { return d.id === selected.device.id; })[0] || selected.device;
+                renderVehicle();
+            }
         }).catch(function (e) {
             showMsg('No se pudieron cargar los datos: ' + errText(e), 'err');
         });
@@ -147,6 +162,79 @@ geotab.addin.movimientos = function () {
         }).catch(function () {
             isAdmin = false;
         });
+    }
+
+    /** Busca por patente: primero un vehículo activo, si no el último archivado. */
+    function findByPlate(plate) {
+        var p = norm(plate);
+        if (!p) { return null; }
+        var found = devices.filter(function (d) { return norm(d.licensePlate) === p || norm(d.name) === p; });
+        var active = found.filter(function (d) { return !isArchived(d); })[0];
+        if (active) { return active; }
+        return found.sort(function (a, b) { return new Date(b.activeTo) - new Date(a.activeTo); })[0] || null;
+    }
+
+    function activeBySerial(serial, exceptId) {
+        return devices.filter(function (d) { return !isArchived(d) && d.id !== exceptId && norm(d.serialNumber) === serial; })[0] || null;
+    }
+
+    function readOdometerKm(deviceId) {
+        var now = new Date().toISOString();
+        return call('Get', {
+            typeName: 'StatusData',
+            search: { deviceSearch: { id: deviceId }, diagnosticSearch: { id: 'DiagnosticOdometerAdjustmentId' }, fromDate: now, toDate: now },
+            resultsLimit: 1
+        }).then(function (list) {
+            var odo = list && list[0];
+            return odo && typeof odo.data === 'number' ? odo.data / 1000 : null;
+        });
+    }
+
+    function getFullDevice(id) {
+        return call('Get', { typeName: 'Device', search: { id: id }, resultsLimit: 1 }).then(function (list) {
+            if (!list || !list[0]) { throw new Error('El vehículo ya no está disponible en MyGeotab.'); }
+            return list[0];
+        });
+    }
+
+    /** Asigna un GO al vehículo; el tipo se deduce del prefijo de la serie. */
+    function setSerial(entity, serial) {
+        entity.serialNumber = serial;
+        var type = GO_TYPES[serial.substring(0, 2)];
+        if (type) { entity.deviceType = type; }
+        delete entity.productId;
+    }
+
+    /** Corrige el odómetro en Geotab solo si difiere de la lectura actual (o no hay lectura). */
+    function syncOdometer(deviceId, km, rec) {
+        return readOdometerKm(deviceId).catch(function () { return null; }).then(function (current) {
+            if (current !== null && Math.abs(current - km) < 1) { rec.odometerUpdated = false; return; }
+            return call('Add', {
+                typeName: 'StatusData',
+                entity: {
+                    device: { id: deviceId },
+                    diagnostic: { id: 'DiagnosticOdometerAdjustmentId' },
+                    data: km * 1000,
+                    dateTime: new Date().toISOString()
+                }
+            }).then(function () { rec.odometerUpdated = true; });
+        }).catch(function () {
+            rec.odometerUpdated = false;
+            rec.odometerError = true;
+        });
+    }
+
+    function confirmAsk(title, text, okLabel) {
+        $('#mv-confirm-title').textContent = title;
+        $('#mv-confirm-text').textContent = text;
+        $('#mv-confirm-ok').textContent = okLabel;
+        $('#mv-confirm').hidden = false;
+        return new Promise(function (resolve) { confirmResolve = resolve; });
+    }
+    function closeConfirm(answer) {
+        var m = $('#mv-confirm');
+        if (m) { m.hidden = true; }
+        if (confirmResolve) { var r = confirmResolve; confirmResolve = null; r(answer); }
     }
 
     function saveNew(details) {
@@ -217,7 +305,43 @@ geotab.addin.movimientos = function () {
         clearErrors(f);
         f.elements.date.value = today();
         syncCameraSerial(f.elements.cameraModel, f.elements.cameraSerial, 'Elegí primero marca y modelo');
-        warnedInstall = null;
+        syncPlate();
+    }
+
+    function renderGroups() {
+        var select = $('#mv-install').elements.group, value = select.value;
+        select.innerHTML = '<option value="">Elegí el grupo</option>' + groups.map(function (g) {
+            return '<option value="' + esc(g.id) + '"' + (g.id === value ? ' selected' : '') + '>' + esc(g.name) + '</option>';
+        }).join('');
+    }
+
+    /** Según la patente: vehículo nuevo, archivado por reactivar o ya activo. */
+    function syncPlate() {
+        var f = $('#mv-install'), el = f.elements, note = $('#mv-plate-note'), hint = $('#mv-odo-hint');
+        var token = ++odoToken, device = findByPlate(el.plate.value);
+        note.hidden = true;
+        hint.hidden = true;
+        f.querySelector('[data-group-field]').hidden = !!device;
+        if (!device) { return; }
+        var archived = isArchived(device);
+        if (!archived && serialOf(device)) {
+            note.className = 'mv-msg mv-msg-err';
+            note.textContent = 'Esta patente ya está activa en Geotab con el GO ' + serialOf(device) + '. Para cambiarlo, usá Desinstalación / Reemplazo.';
+            note.hidden = false;
+            return;
+        }
+        note.className = 'mv-msg mv-msg-warn';
+        note.textContent = archived ?
+            'Esta patente está archivada en Geotab como ' + device.name + '. Al registrar, se reactiva el vehículo y se le asigna el GO.' :
+            'Esta patente ya existe en Geotab sin GO (' + device.name + '). Al registrar, se le asigna el GO.';
+        note.hidden = false;
+        if (!el.chassis.value && device.vehicleIdentificationNumber) { el.chassis.value = device.vehicleIdentificationNumber; }
+        readOdometerKm(device.id).catch(function () { return null; }).then(function (km) {
+            if (token !== odoToken) { return; }
+            hint.textContent = km === null ? 'Sin lectura actual en Geotab.' : 'Lectura actual en Geotab: ' + fmtKm(Math.round(km)) + '. Si cambiás el valor, se corrige en MyGeotab.';
+            hint.hidden = false;
+            if (km !== null && !el.odometer.value) { el.odometer.value = Math.round(km); }
+        });
     }
 
     function syncCameraSerial(select, input, emptyHint) {
@@ -248,22 +372,25 @@ geotab.addin.movimientos = function () {
         if (!checkCommon(f)) { ok = false; }
         if (!ok) { return; }
 
-        var bySerial = devices.filter(function (d) { return !isArchived(d) && norm(d.serialNumber) === v.goSerial; })[0];
-        var byPlate = devices.filter(function (d) { return !isArchived(d) && (norm(d.licensePlate) === norm(v.plate) || norm(d.name) === norm(v.plate)); })[0];
-        var signature = JSON.stringify(v);
-        var warn = [];
-        if (bySerial) { warn.push('el GO ' + v.goSerial + ' ya figura en Geotab en ' + (bySerial.licensePlate || bySerial.name)); }
-        if (byPlate && serialOf(byPlate) && byPlate !== bySerial) { warn.push('la patente ' + v.plate + ' ya tiene en Geotab el GO ' + serialOf(byPlate)); }
-        if (warn.length && warnedInstall !== signature) {
-            warnedInstall = signature;
-            showMsg('Revisá los datos: ' + warn.join(' y ') + '. Si son correctos, tocá de nuevo "Registrar instalación".', 'warn');
+        var existing = findByPlate(v.plate);
+        var archived = !!existing && isArchived(existing);
+        if (existing && !archived && serialOf(existing)) {
+            fieldError(f, 'plate', 'Ya está activa con el GO ' + serialOf(existing) + '. Usá Desinstalación / Reemplazo.');
+            return;
+        }
+        var inUse = activeBySerial(v.goSerial, existing && existing.id);
+        if (inUse) {
+            fieldError(f, 'goSerial', 'Este GO ya está asignado a ' + (inUse.licensePlate || inUse.name) + '.');
+            return;
+        }
+        if (!existing && !el.group.value) {
+            fieldError(f, 'group', 'Elegí el grupo.');
             return;
         }
 
-        var device = bySerial || byPlate || null;
         var rec = baseRecord('instalacion', el.date.value, el.odometer.value);
-        rec.deviceId = device ? device.id : null;
-        rec.deviceName = device ? device.name : '';
+        rec.deviceId = existing ? existing.id : null;
+        rec.deviceName = existing ? existing.name : v.plate;
         rec.licensePlate = v.plate;
         rec.chassis = v.chassis;
         rec.vehicleBrand = v.brand;
@@ -271,20 +398,67 @@ geotab.addin.movimientos = function () {
         rec.goSerial = v.goSerial;
         rec.harness = v.harness;
         rec.camera = v.cameraModel ? { model: v.cameraModel, serial: v.cameraSerial } : null;
+        var groupId = el.group.value;
 
-        persist(rec, f, function () {
-            resetInstall();
-            showMsg('Instalación registrada: ' + v.plate + ' · GO ' + v.goSerial + '.', 'ok');
-            openComm(rec);
+        function step() {
+            var write;
+            if (!existing) {
+                write = call('Add', {
+                    typeName: 'Device',
+                    entity: {
+                        name: v.plate, serialNumber: v.goSerial, licensePlate: v.plate,
+                        vehicleIdentificationNumber: v.chassis, comment: v.brand + ' ' + v.model,
+                        groups: [{ id: groupId }]
+                    }
+                }).then(function (id) { rec.deviceId = id; rec.geotab = { action: 'created' }; });
+            } else {
+                write = getFullDevice(existing.id).then(function (entity) {
+                    setSerial(entity, v.goSerial);
+                    entity.activeTo = MAX_DATE;
+                    entity.licensePlate = v.plate;
+                    entity.vehicleIdentificationNumber = v.chassis;
+                    if (!entity.comment) { entity.comment = v.brand + ' ' + v.model; }
+                    return call('Set', { typeName: 'Device', entity: entity });
+                }).then(function () { rec.geotab = { action: archived ? 'reactivated' : 'assigned' }; });
+            }
+            return write.then(function () {
+                rec.geotab.at = new Date().toISOString();
+                return syncOdometer(rec.deviceId, rec.odometerKm, rec);
+            });
+        }
+        function run() {
+            persist(rec, f, step, function () {
+                resetInstall();
+                showMsg('Instalación registrada: ' + v.plate + ' · GO ' + v.goSerial + ' (' + GEOTAB_LABEL[rec.geotab.action] + ').' + odoWarning(rec), rec.odometerError ? 'warn' : 'ok');
+                openComm(rec);
+            });
+        }
+        if (!archived) { run(); return; }
+        confirmAsk('Reactivar vehículo', 'Se va a reactivar ' + existing.name + ' en MyGeotab y asignarle el GO ' + v.goSerial + '.', 'Reactivar y registrar').then(function (yes) {
+            if (yes) { run(); }
         });
     }
 
-    function persist(rec, form, done) {
+    function odoWarning(rec) {
+        return rec.odometerError ? ' No se pudo actualizar el odómetro en MyGeotab: corregilo desde el vehículo.' : '';
+    }
+
+    /** Primero MyGeotab y después el registro: si Geotab rechaza, no queda ningún movimiento. */
+    function persist(rec, form, deviceStep, done) {
+        if (saving) { return; }
         var btn = form.querySelector('button[type=submit]');
+        var deviceDone = false;
         saving = true;
         btn.disabled = true;
-        saveNew(rec).then(done).catch(function (e) {
-            showMsg('No se pudo registrar el movimiento: ' + errText(e), 'err');
+        deviceStep().then(function () {
+            deviceDone = true;
+            return saveNew(rec).catch(function () { return saveNew(rec); });
+        }).then(function () {
+            return loadData();
+        }).then(done).catch(function (e) {
+            showMsg(deviceDone ?
+                'MyGeotab se actualizó, pero no se pudo guardar el registro del movimiento: ' + errText(e) + '. Avisá a soporte; no vuelvas a cargarlo.' :
+                'MyGeotab rechazó el movimiento y no se registró: ' + errText(e), 'err');
         }).then(function () {
             saving = false;
             btn.disabled = false;
@@ -331,20 +505,11 @@ geotab.addin.movimientos = function () {
         renderVehicle();
         var now = new Date().toISOString();
         Promise.all([
-            call('Get', {
-                typeName: 'StatusData',
-                search: {
-                    deviceSearch: { id: device.id },
-                    diagnosticSearch: { id: 'DiagnosticOdometerAdjustmentId' },
-                    fromDate: now, toDate: now
-                },
-                resultsLimit: 1
-            }).catch(function () { return []; }),
+            readOdometerKm(device.id).catch(function () { return null; }),
             call('Get', { typeName: 'DeviceStatusInfo', search: { deviceSearch: { id: device.id } }, resultsLimit: 1 }).catch(function () { return []; })
         ]).then(function (res) {
             if (token !== selectToken || !selected) { return; }
-            var odo = res[0] && res[0][0];
-            selected.odometerKm = odo && typeof odo.data === 'number' ? Math.round(odo.data / 1000) : null;
+            selected.odometerKm = res[0] === null ? null : Math.round(res[0]);
             selected.lastSeen = res[1] && res[1][0] ? res[1][0].dateTime : '';
             selected.odometerLoaded = true;
             updateOdometer();
@@ -409,13 +574,14 @@ geotab.addin.movimientos = function () {
             '</div>' +
             '<div class="mv-grid">' +
             '<label>Fecha *<input type="date" name="date" required></label>' +
-            '<label>Odómetro al momento del movimiento (km) *<input type="number" name="odometer" min="0" step="1" inputmode="numeric" required></label>' +
+            '<label>Odómetro al momento del movimiento (km) *<input type="number" name="odometer" min="0" step="1" inputmode="numeric" required><span class="mv-hint">Verificá la lectura; si la cambiás, se corrige en MyGeotab.</span></label>' +
             '</div>' +
 
             '<div data-kind="desinstalacion" class="mv-sub-block"><div class="mv-grid">' +
             '<label>Qué se retiró *<select name="removed">' +
             Object.keys(REMOVED_LABEL).map(function (k) { return '<option value="' + k + '">' + esc(REMOVED_LABEL[k]) + '</option>'; }).join('') +
             '</select></label></div>' +
+            '<p class="mv-hint" data-removed-note>Al retirar el GO, el vehículo se archiva en MyGeotab: conserva su historial y Geotab deja de facturarlo.</p>' +
             '<div class="mv-grid" data-removed-camera>' +
             '<label>Cámara retirada<select name="oldCameraModelU">' + options(CAMERAS, 'Sin dato', cam.model) + '</select></label>' +
             '<label>Serie de cámara retirada<input name="oldCameraSerialU" maxlength="30" value="' + esc(cam.serial) + '"></label>' +
@@ -451,6 +617,7 @@ geotab.addin.movimientos = function () {
         $$('[data-kind]', f).forEach(function (n) { n.hidden = n.getAttribute('data-kind') !== kind; });
         $$('[data-rep]', f).forEach(function (n) { n.hidden = !el[n.getAttribute('data-rep')].checked; });
         f.querySelector('[data-removed-camera]').hidden = el.removed.value === 'go';
+        f.querySelector('[data-removed-note]').hidden = el.removed.value === 'camara';
         syncCameraSerial(el.newCameraModel, el.newCameraSerial, 'Elegí primero marca y modelo');
     }
 
@@ -504,12 +671,50 @@ geotab.addin.movimientos = function () {
         }
         if (!ok) { return; }
 
+        var archivedNow = isArchived(d);
+        var removesGo = kind === 'desinstalacion' && rec.removed !== 'camara';
+        var newGo2 = rec.replaced && rec.replaced.go ? rec.replaced.go.to : '';
+        if (newGo2 && archivedNow) {
+            fieldError(f, 'newGoSerial', 'El vehículo está archivado: reactivalo desde Instalación.');
+            return;
+        }
+        if (newGo2) {
+            var inUse = activeBySerial(newGo2, d.id);
+            if (inUse) { fieldError(f, 'newGoSerial', 'Este GO ya está asignado a ' + (inUse.licensePlate || inUse.name) + '.'); return; }
+        }
+
+        function step() {
+            if (archivedNow) { return Promise.resolve(); }
+            return syncOdometer(d.id, rec.odometerKm, rec).then(function () {
+                if (!removesGo && !newGo2) { return null; }
+                return getFullDevice(d.id).then(function (entity) {
+                    if (removesGo) { entity.activeTo = new Date().toISOString(); } else { setSerial(entity, newGo2); }
+                    return call('Set', { typeName: 'Device', entity: entity });
+                }).then(function () {
+                    rec.geotab = { action: removesGo ? 'archived' : 'serial', at: new Date().toISOString() };
+                });
+            });
+        }
         var name = d.licensePlate || d.name;
-        persist(rec, f, function () {
-            renderVehicle();
-            showMsg(TYPE_LABEL[kind] + ' registrada: ' + name + '.', 'ok');
-            if (commSerial(rec)) { openComm(rec); }
-        });
+        function run() {
+            persist(rec, f, step, function () {
+                renderVehicle();
+                var extra = rec.geotab ? ' (' + GEOTAB_LABEL[rec.geotab.action] + ')' : '';
+                showMsg(TYPE_LABEL[kind] + ' registrada: ' + name + extra + '.' + odoWarning(rec), rec.odometerError ? 'warn' : 'ok');
+                if (commSerial(rec)) { openComm(rec); }
+            });
+        }
+        if (removesGo && !archivedNow) {
+            confirmAsk('Archivar vehículo', 'Se va a archivar ' + name + ' en MyGeotab. Conserva su historial, pero deja de reportar y Geotab deja de facturarlo.', 'Archivar y registrar').then(function (yes) {
+                if (yes) { run(); }
+            });
+        } else if (newGo2) {
+            confirmAsk('Cambiar GO', 'En MyGeotab, ' + name + ' va a pasar del GO ' + (serialOf(d) || 'sin dato') + ' al ' + newGo2 + '.', 'Cambiar y registrar').then(function (yes) {
+                if (yes) { run(); }
+            });
+        } else {
+            run();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -535,6 +740,8 @@ geotab.addin.movimientos = function () {
             if (r.camera) { parts.push('Cámara ' + camText(r.camera.from) + ' → ' + camText(r.camera.to)); }
             if (r.harness) { parts.push('Arnés ' + (r.harness.from || 'sin dato') + ' → ' + r.harness.to); }
         }
+        if (d.geotab) { parts.push('MyGeotab: ' + (GEOTAB_LABEL[d.geotab.action] || d.geotab.action)); }
+        if (d.odometerUpdated) { parts.push('odómetro corregido'); }
         if (d.notes) { parts.push(d.notes); }
         return parts.filter(Boolean).join(' · ');
     }
@@ -579,6 +786,65 @@ geotab.addin.movimientos = function () {
         $('#mv-history-count').textContent = rows.length ? rows.length + (rows.length === 1 ? ' movimiento' : ' movimientos') : '';
     }
 
+    // ------------------------------------------------------------------
+    // Vehículos
+    // ------------------------------------------------------------------
+    function vehicleRows() {
+        return devices.map(function (d) {
+            var recs = recordsOf(d);
+            var install = recs.filter(function (r) { return r.details.movementType === 'instalacion'; })[0];
+            var last = recs.length ? recs[recs.length - 1].details : null;
+            var from = d.activeFrom ? new Date(d.activeFrom) : null;
+            var fromValid = from && !isNaN(from) && from.getFullYear() >= 2000;
+            return {
+                device: d, archived: isArchived(d),
+                first: install ? fmtDay(install.details.date) : fromValid ? from.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '',
+                source: install ? 'Instalación en el add-in' : fromValid ? 'activeFrom de Geotab' : 'Sin dato',
+                last: last ? TYPE_LABEL[last.movementType] + ' · ' + fmtDay(last.date) : ''
+            };
+        });
+    }
+
+    function filteredVehicles() {
+        var q = norm($('#mv-v-text').value), state = $('#mv-v-state').value;
+        return vehicleRows().filter(function (r) {
+            if (state === 'active' && r.archived) { return false; }
+            if (state === 'archived' && !r.archived) { return false; }
+            var d = r.device;
+            return !q || norm([d.name, d.licensePlate, serialOf(d)].join(' ')).indexOf(q) >= 0;
+        }).sort(function (a, b) { return String(a.device.name).localeCompare(String(b.device.name), 'es'); });
+    }
+
+    function renderVehicles() {
+        var rows = filteredVehicles();
+        $('#mv-vehicles').innerHTML = rows.map(function (r) {
+            var d = r.device;
+            return '<tr><td>' + esc(d.name) + '</td><td>' + esc(d.licensePlate) + '</td><td>' + esc(serialOf(d)) + '</td>' +
+                '<td>' + esc(r.first) + '</td><td class="mv-muted">' + esc(r.source) + '</td><td>' + esc(r.last) + '</td>' +
+                '<td><span class="mv-badge' + (r.archived ? '' : ' mv-state-ok') + '">' + (r.archived ? 'Archivado' : 'Activo') + '</span></td></tr>';
+        }).join('');
+        $('#mv-vehicles-empty').hidden = rows.length > 0;
+        $('#mv-vehicles-count').textContent = rows.length ? rows.length + (rows.length === 1 ? ' vehículo' : ' vehículos') : '';
+    }
+
+    function downloadCsv(name, lines) {
+        var blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name + '_' + today() + '.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }
+
+    function exportVehicles() {
+        var head = ['Vehiculo', 'Patente', 'Serie GO', 'Primera instalacion', 'Origen de la fecha', 'Ultimo movimiento', 'Estado'];
+        downloadCsv('vehiculos', [head.map(csvCell).join(';')].concat(filteredVehicles().map(function (r) {
+            return [r.device.name, r.device.licensePlate, serialOf(r.device), r.first, r.source, r.last, r.archived ? 'Archivado' : 'Activo'].map(csvCell).join(';');
+        })));
+    }
+
     function csvCell(v) {
         var s = String(v === undefined || v === null ? '' : v);
         if (/^[=+\-@]/.test(s)) { s = "'" + s; }
@@ -595,14 +861,7 @@ geotab.addin.movimientos = function () {
                 d.goSerial, d.harness, c.model, c.serial, d.odometerKm, detailOf(d), d.createdBy, fmtDateTime(d.createdAt),
                 d.voided ? 'Si' : 'No', d.voidReason].map(csvCell).join(';');
         }));
-        var blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-        var a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'movimientos_' + today() + '.csv';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+        downloadCsv('movimientos', lines);
     }
 
     // ------------------------------------------------------------------
@@ -668,7 +927,8 @@ geotab.addin.movimientos = function () {
                 }], target));
                 return null;
             }
-            var start = new Date(target.date + 'T00:00:00');
+            // Con el GO asignado desde el add-in, cuenta desde ese momento: evita tomar datos del GO anterior.
+            var start = target.geotab && target.geotab.at ? new Date(target.geotab.at) : new Date(target.date + 'T00:00:00');
             var now = new Date().toISOString();
             var from = start.toISOString();
             var deviceSearch = { id: device.id };
@@ -756,7 +1016,7 @@ geotab.addin.movimientos = function () {
         f.reset();
         clearErrors(f);
         $('#mv-void-desc').textContent = TYPE_LABEL[d.movementType] + ' · ' + (d.licensePlate || d.deviceName) + ' · ' + fmtDay(d.date) +
-            '. El registro queda en el historial como anulado.';
+            '. El registro queda en el historial como anulado. Esto no revierte los cambios hechos en MyGeotab.';
         $('#mv-modal').hidden = false;
         f.elements.reason.focus();
     }
@@ -802,9 +1062,10 @@ geotab.addin.movimientos = function () {
     // ------------------------------------------------------------------
     function switchTab(name) {
         $$('.mv-tab').forEach(function (t) { t.classList.toggle('is-active', t.getAttribute('data-tab') === name); });
-        ['install', 'change', 'history'].forEach(function (t) { $('#mv-tab-' + t).hidden = t !== name; });
+        ['install', 'change', 'vehicles', 'history'].forEach(function (t) { $('#mv-tab-' + t).hidden = t !== name; });
         clearMsg();
         if (name === 'history') { renderHistory(); }
+        if (name === 'vehicles') { renderVehicles(); }
     }
 
     function bindEvents() {
@@ -821,6 +1082,7 @@ geotab.addin.movimientos = function () {
             syncCameraSerial(inst.elements.cameraModel, inst.elements.cameraSerial, 'Elegí primero marca y modelo');
         });
 
+        inst.elements.plate.addEventListener('change', syncPlate);
         $('#mv-search').addEventListener('submit', submitSearch);
         $('#mv-results').addEventListener('click', function (e) {
             var b = e.target.closest('[data-device]');
@@ -850,6 +1112,11 @@ geotab.addin.movimientos = function () {
         });
         $('#mv-void').addEventListener('submit', submitVoid);
         $('#mv-void-cancel').addEventListener('click', closeVoid);
+        $('#mv-confirm-ok').addEventListener('click', function () { closeConfirm(true); });
+        $('#mv-confirm-cancel').addEventListener('click', function () { closeConfirm(false); });
+        $('#mv-v-text').addEventListener('input', renderVehicles);
+        $('#mv-v-state').addEventListener('change', renderVehicles);
+        $('#mv-v-export').addEventListener('click', exportVehicles);
         $('#mv-comm-refresh').addEventListener('click', refreshComm);
         $('#mv-comm-close').addEventListener('click', closeComm);
     }
@@ -881,6 +1148,7 @@ geotab.addin.movimientos = function () {
         blur: function () {
             closeVoid();
             closeComm();
+            closeConfirm(false);
         }
     };
 };

@@ -20,6 +20,8 @@
 .mv-msg-warn { background: var(--mv-warn-bg); color: var(--mv-warn-fg); }
 .mv-msg-err { background: var(--mv-err-bg); color: var(--mv-danger); }
 
+.mv-hint { color: var(--mv-muted); font-size: 12px; }
+#mv-plate-note { margin-bottom: 12px; }
 .mv-form { max-width: 860px; }
 .mv-form fieldset, .mv-card { border: 1px solid var(--mv-line); border-radius: 6px; padding: 14px 16px; margin: 0 0 14px; }
 .mv-form legend { padding: 0 6px; font-weight: 500; }
