@@ -932,29 +932,109 @@ geotab.addin.movimientos = function () {
             var now = new Date().toISOString();
             var from = start.toISOString();
             var deviceSearch = { id: device.id };
-            return Promise.all([
-                fetchOrError({ typeName: 'DeviceStatusInfo', search: { deviceSearch: deviceSearch }, resultsLimit: 1 }),
-                fetchOrError({ typeName: 'LogRecord', search: { deviceSearch: deviceSearch, fromDate: from, toDate: now }, resultsLimit: 3 }),
-                fetchOrError({
-                    typeName: 'StatusData',
-                    search: { deviceSearch: deviceSearch, diagnosticSearch: { id: 'DiagnosticEngineSpeedId' }, fromDate: from, toDate: now },
-                    resultsLimit: 3
-                })
-            ]).then(function (res) {
-                finish(commHtml(commChecks(target, device, start, res[0], res[1], res[2]), target));
+            // GetDeviceHistory es lo que usa Geotab en "Estado del dispositivo". No está documentado
+            // y puede no estar habilitado para todos: si falla, se verifica con los datos del vehículo.
+            return call('GetDeviceHistory', { device: { id: device.id } }).catch(function () { return null; }).then(function (history) {
+                var latest = latestHistory(history);
+                if (latest) {
+                    finish(commHtml(historyChecks(target, device, start, latest), target, latest));
+                    return null;
+                }
+                return fallbackComm();
             });
+
+            function fallbackComm() {
+                return Promise.all([
+                    fetchOrError({ typeName: 'DeviceStatusInfo', search: { deviceSearch: deviceSearch }, resultsLimit: 1 }),
+                    fetchOrError({ typeName: 'LogRecord', search: { deviceSearch: deviceSearch, fromDate: from, toDate: now }, resultsLimit: 3 }),
+                    fetchOrError({
+                        typeName: 'StatusData',
+                        search: { deviceSearch: deviceSearch, diagnosticSearch: { id: 'DiagnosticEngineSpeedId' }, fromDate: from, toDate: now },
+                        resultsLimit: 3
+                    })
+                ]).then(function (res) {
+                    finish(commHtml(commChecks(target, device, start, res[0], res[1], res[2]), target));
+                });
+            }
         }).catch(function (e) {
             finish('<div class="mv-msg mv-msg-err">No se pudo consultar el estado: ' + esc(errText(e)) + '</div>');
         });
     }
 
-    function commChecks(target, device, start, status, logs, engine) {
+    function latestHistory(history) {
+        if (!Array.isArray(history) || !history.length) { return null; }
+        return history.slice().sort(function (a, b) {
+            return new Date(b.resultDateUtc || 0) - new Date(a.resultDateUtc || 0);
+        })[0];
+    }
+
+    /** Geotab devuelve estos textos en inglés; lo desconocido se muestra tal cual. */
+    function translateIssues(text) {
+        var map = {
+            'no valid gps records': 'sin registros GPS válidos',
+            'no recent ignition on': 'sin encendido reciente',
+            'no recent engine data': 'sin datos de motor recientes',
+            'no recent aux logs': 'sin registros auxiliares recientes'
+        };
+        return String(text || '').split(',').map(function (t) {
+            t = t.trim();
+            return map[t.toLowerCase()] || t;
+        }).filter(Boolean).join(', ');
+    }
+
+    function historyCheck(title, value, start, okText, pendingText) {
+        var date = value ? new Date(value) : null;
+        if (date && date >= start) {
+            return { state: 'ok', title: title, text: okText + ': ' + fmtDateTime(value) + '.' };
+        }
+        return { state: 'pending', title: title, text: pendingText + (date ? ' Último registro: ' + fmtDateTime(value) + '.' : '') };
+    }
+
+    function historyChecks(target, device, start, h) {
+        var checks = baseChecks(target, device);
+        var comm = historyCheck('Comunicación', h.lastServerCommunication, start, 'Última comunicación',
+            'Sin comunicación desde la instalación. Encendé el motor, esperá unos minutos y refrescá.');
+        if (comm.state === 'ok' && h.hasRecentComms === false) {
+            comm.state = 'warn';
+            comm.text += ' Ahora no está comunicando: puede estar apagado.';
+        }
+        checks.push(comm);
+        checks.push(historyCheck('Posición GPS', h.lastValidGpsRecord, start, 'Último GPS válido',
+            'Sin GPS válido desde la instalación. Probá con el vehículo a cielo abierto.'));
+        checks.push(historyCheck('Encendido', h.lastValidIgnitionRecord, start, 'Último encendido',
+            'Sin encendido desde la instalación. Encendé el motor y refrescá.'));
+        checks.push(historyCheck('Datos de motor', h.lastValidEngineRecord, start, 'Último dato de motor',
+            'Sin datos de motor desde la instalación. Probá con el motor en marcha; si sigue igual, revisá el arnés.'));
+        pushVinCheck(checks, target, device);
+        if (h.possibleIssues) {
+            checks.push({ state: 'warn', title: 'Posibles problemas', text: translateIssues(h.possibleIssues) + '.' });
+        }
+        return checks;
+    }
+
+    function baseChecks(target, device) {
         var checks = [];
         var plateOk = !target.licensePlate || [norm(device.licensePlate), norm(device.name)].indexOf(norm(target.licensePlate)) >= 0;
         checks.push({
             state: plateOk ? 'ok' : 'warn', title: 'Alta en Geotab',
             text: (device.licensePlate || device.name) + (plateOk ? '' : ': no coincide con la patente declarada (' + target.licensePlate + ').')
         });
+        return checks;
+    }
+
+    function pushVinCheck(checks, target, device) {
+        var engineVin = norm(device.engineVehicleIdentificationNumber);
+        if (target.chassis && engineVin.length >= 11) {
+            var same = engineVin === norm(target.chassis);
+            checks.push({
+                state: same ? 'ok' : 'warn', title: 'Chasis',
+                text: same ? 'El VIN leído del motor coincide con el declarado.' : 'El VIN leído del motor (' + engineVin + ') no coincide con el declarado (' + target.chassis + ').'
+            });
+        }
+    }
+
+    function commChecks(target, device, start, status, logs, engine) {
+        var checks = baseChecks(target, device);
 
         var info = status && status[0];
         var last = info && info.dateTime ? new Date(info.dateTime) : null;
@@ -980,18 +1060,11 @@ geotab.addin.movimientos = function () {
                 { state: 'ok', title: 'Datos de motor', text: 'Se recibieron RPM desde la instalación.' } :
                 { state: 'pending', title: 'Datos de motor', text: 'Sin RPM desde la instalación. Probá con el motor en marcha; si sigue igual, revisá el arnés.' });
 
-        var engineVin = norm(device.engineVehicleIdentificationNumber);
-        if (target.chassis && engineVin.length >= 11) {
-            var same = engineVin === norm(target.chassis);
-            checks.push({
-                state: same ? 'ok' : 'warn', title: 'Chasis',
-                text: same ? 'El VIN leído del motor coincide con el declarado.' : 'El VIN leído del motor (' + engineVin + ') no coincide con el declarado (' + target.chassis + ').'
-            });
-        }
+        pushVinCheck(checks, target, device);
         return checks;
     }
 
-    function commHtml(checks, target) {
+    function commHtml(checks, target, history) {
         var label = { ok: 'Correcto', warn: 'Revisar', pending: 'Pendiente', err: 'Error' };
         var allOk = checks.every(function (c) { return c.state === 'ok'; });
         var camera = (target.replaced && target.replaced.camera ? target.replaced.camera.to : target.camera);
@@ -1001,8 +1074,19 @@ geotab.addin.movimientos = function () {
                 return '<li><span class="mv-badge mv-state mv-state-' + c.state + '">' + label[c.state] + '</span>' +
                     '<div><strong>' + esc(c.title) + '</strong>' + esc(c.text) + '</div></li>';
             }).join('') + '</ul>' +
+            (history ? '<p class="mv-foot">' + esc(historyFacts(history)) + '</p>' : '') +
             '<p class="mv-foot">Consultado: ' + esc(fmtDateTime(new Date().toISOString())) +
             (camera ? ' · No incluye el estado de la cámara.' : '') + '</p>';
+    }
+
+    function historyFacts(h) {
+        var warranty = { lifetime: 'de por vida' }[String(h.warrantyStatus || '').toLowerCase()] || h.warrantyStatus;
+        var facts = [];
+        if (h.devicePlan) { facts.push('Plan de datos: ' + h.devicePlan); }
+        if (warranty) { facts.push('Garantía: ' + warranty); }
+        if (h.firmwareVersion) { facts.push('Firmware: ' + h.firmwareVersion); }
+        if (h.comments) { facts.push('Comentarios: ' + translateIssues(h.comments)); }
+        return facts.join(' · ');
     }
 
     // ------------------------------------------------------------------

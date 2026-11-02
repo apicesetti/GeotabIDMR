@@ -29,7 +29,8 @@ Para otra URL de hosting: `python build.py URL_BASE`.
 
 ## Estado de comunicación
 Se abre al registrar una instalación o un reemplazo de GO, y desde *Historial → Comunicación*. **Refrescar estado** vuelve a consultar Geotab:
-alta del GO, comunicación (`DeviceStatusInfo`), posiciones (`LogRecord`), RPM (`StatusData`) y VIN del motor contra el chasis declarado.
+alta del GO, comunicación, GPS, encendido, motor y posibles problemas con `GetDeviceHistory` (el método no documentado que usa la pantalla de Geotab), más VIN del motor contra el chasis declarado.
+Si `GetDeviceHistory` falla, usa `DeviceStatusInfo`, `LogRecord` y `StatusData`.
 Solo cuentan registros reales desde que el add-in asignó el GO (o desde el día del movimiento en registros anteriores). La consulta no se guarda ni cubre la cámara.
 
 ## Permisos
