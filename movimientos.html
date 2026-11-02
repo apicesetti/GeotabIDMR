@@ -94,6 +94,19 @@
         <p id="mv-history-count" class="mv-foot"></p>
     </section>
 
+    <!-- ============ COMUNICACIÓN ============ -->
+    <div id="mv-comm" class="mv-modal" hidden>
+        <div class="mv-modal-box mv-modal-wide" role="dialog" aria-modal="true" aria-labelledby="mv-comm-title">
+            <h2 id="mv-comm-title">Estado de comunicación</h2>
+            <p id="mv-comm-desc" class="mv-muted"></p>
+            <div id="mv-comm-body" aria-live="polite"></div>
+            <div class="mv-actions">
+                <button type="button" id="mv-comm-refresh" class="mv-btn">Refrescar estado</button>
+                <button type="button" id="mv-comm-close" class="mv-btn mv-btn-ghost">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ============ ANULAR ============ -->
     <div id="mv-modal" class="mv-modal" hidden>
         <form id="mv-void" novalidate class="mv-modal-box" role="dialog" aria-modal="true" aria-labelledby="mv-void-title">

@@ -10,6 +10,11 @@ Solo escribe en `AddInData`: **no modifica vehículos ni equipos en Geotab**.
 
 Para otra URL de hosting: `python build.py URL_BASE`.
 
+## Estado de comunicación
+Se abre al registrar una instalación o un reemplazo de GO, y desde *Historial → Comunicación*. **Refrescar estado** vuelve a consultar Geotab:
+alta del GO, comunicación (`DeviceStatusInfo`), posiciones (`LogRecord`), RPM (`StatusData`) y VIN del motor contra el chasis declarado.
+Solo cuentan registros reales desde el día del movimiento. La consulta no se guarda ni cubre la cámara.
+
 ## Permisos
 - Registrar y consultar: usuarios con acceso de escritura a datos de add-ins.
 - Anular: solo perfil **Administrador** de MyGeotab (`GroupEverythingSecurityId`). El control está en la interfaz del add-in; la API de MyGeotab no lo impone sobre `AddInData`.

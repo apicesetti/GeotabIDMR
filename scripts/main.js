@@ -25,6 +25,8 @@ geotab.addin.movimientos = function () {
     var loadToken = 0;
     var warnedInstall = null;   // firma del formulario ya advertido por duplicado
     var voidTarget = null;
+    var commTarget = null;
+    var commToken = 0;
     var saving = false;
     var bound = false;
 
@@ -273,6 +275,7 @@ geotab.addin.movimientos = function () {
         persist(rec, f, function () {
             resetInstall();
             showMsg('Instalación registrada: ' + v.plate + ' · GO ' + v.goSerial + '.', 'ok');
+            openComm(rec);
         });
     }
 
@@ -505,6 +508,7 @@ geotab.addin.movimientos = function () {
         persist(rec, f, function () {
             renderVehicle();
             showMsg(TYPE_LABEL[kind] + ' registrada: ' + name + '.', 'ok');
+            if (commSerial(rec)) { openComm(rec); }
         });
     }
 
@@ -565,7 +569,10 @@ geotab.addin.movimientos = function () {
                 (d.voided ? '<br>Anulado por ' + esc(d.voidedBy) + ': ' + esc(d.voidReason) : '') + '</td>' +
                 '<td style="white-space:nowrap">' + esc(fmtKm(d.odometerKm)) + '</td>' +
                 '<td>' + esc(d.createdBy) + '<br><span class="mv-muted">' + esc(fmtDateTime(d.createdAt)) + '</span></td>' +
-                '<td>' + (d.voided || !isAdmin ? '' : '<button type="button" class="mv-btn-link" data-void="' + esc(r.id) + '">Anular</button>') + '</td>' +
+                '<td><div class="mv-history-actions">' +
+                (!d.voided && commSerial(d) ? '<button type="button" class="mv-btn-link mv-link-accent" data-comm="' + esc(r.id) + '">Comunicación</button>' : '') +
+                (d.voided || !isAdmin ? '' : '<button type="button" class="mv-btn-link" data-void="' + esc(r.id) + '">Anular</button>') +
+                '</div></td>' +
                 '</tr>';
         }).join('');
         $('#mv-history-empty').hidden = rows.length > 0;
@@ -596,6 +603,146 @@ geotab.addin.movimientos = function () {
         a.click();
         document.body.removeChild(a);
         setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }
+
+    // ------------------------------------------------------------------
+    // Estado de comunicación
+    // ------------------------------------------------------------------
+    /** GO a verificar: el instalado o el nuevo de un reemplazo. */
+    function commSerial(d) {
+        if (d.movementType === 'instalacion') { return d.goSerial; }
+        return d.movementType === 'reemplazo' && d.replaced && d.replaced.go ? d.replaced.go.to : '';
+    }
+
+    function openComm(details) {
+        commTarget = details;
+        $('#mv-comm-desc').textContent = 'GO ' + commSerial(details) + ' · ' + (details.licensePlate || details.deviceName) +
+            ' · ' + TYPE_LABEL[details.movementType].toLowerCase() + ' del ' + fmtDay(details.date);
+        $('#mv-comm').hidden = false;
+        refreshComm();
+    }
+
+    function closeComm() {
+        commToken++;
+        commTarget = null;
+        var m = $('#mv-comm');
+        if (m) { m.hidden = true; }
+    }
+
+    /**
+     * StatusData y LogRecord interpolan: agregan puntos calculados (sin id) y hasta
+     * pueden devolver un dato anterior al período. Solo cuenta un registro real
+     * (con id) posterior al inicio del día del movimiento.
+     */
+    function hasRealData(list, start) {
+        return (list || []).some(function (x) { return x.id && new Date(x.dateTime) >= start; });
+    }
+
+    function fetchOrError(params) {
+        return call('Get', params).catch(function () { return null; });
+    }
+
+    function refreshComm() {
+        if (!commTarget) { return; }
+        var target = commTarget, token = ++commToken, btn = $('#mv-comm-refresh');
+        btn.disabled = true;
+        btn.textContent = 'Consultando…';
+        function finish(html) {
+            if (token !== commToken) { return; }
+            $('#mv-comm-body').innerHTML = html;
+            btn.disabled = false;
+            btn.textContent = 'Refrescar estado';
+        }
+        var serial = commSerial(target);
+        call('Get', {
+            typeName: 'Device',
+            search: { serialNumber: serial },
+            propertySelector: { fields: ['id', 'name', 'serialNumber', 'licensePlate', 'vehicleIdentificationNumber', 'engineVehicleIdentificationNumber', 'activeTo'] },
+            resultsLimit: 1
+        }).then(function (list) {
+            var device = list && list[0];
+            if (!device) {
+                finish(commHtml([{
+                    state: 'pending', title: 'Alta en Geotab',
+                    text: 'El GO ' + serial + ' todavía no figura en esta base, así que no se puede verificar.'
+                }], target));
+                return null;
+            }
+            var start = new Date(target.date + 'T00:00:00');
+            var now = new Date().toISOString();
+            var from = start.toISOString();
+            var deviceSearch = { id: device.id };
+            return Promise.all([
+                fetchOrError({ typeName: 'DeviceStatusInfo', search: { deviceSearch: deviceSearch }, resultsLimit: 1 }),
+                fetchOrError({ typeName: 'LogRecord', search: { deviceSearch: deviceSearch, fromDate: from, toDate: now }, resultsLimit: 3 }),
+                fetchOrError({
+                    typeName: 'StatusData',
+                    search: { deviceSearch: deviceSearch, diagnosticSearch: { id: 'DiagnosticEngineSpeedId' }, fromDate: from, toDate: now },
+                    resultsLimit: 3
+                })
+            ]).then(function (res) {
+                finish(commHtml(commChecks(target, device, start, res[0], res[1], res[2]), target));
+            });
+        }).catch(function (e) {
+            finish('<div class="mv-msg mv-msg-err">No se pudo consultar el estado: ' + esc(errText(e)) + '</div>');
+        });
+    }
+
+    function commChecks(target, device, start, status, logs, engine) {
+        var checks = [];
+        var plateOk = !target.licensePlate || [norm(device.licensePlate), norm(device.name)].indexOf(norm(target.licensePlate)) >= 0;
+        checks.push({
+            state: plateOk ? 'ok' : 'warn', title: 'Alta en Geotab',
+            text: (device.licensePlate || device.name) + (plateOk ? '' : ': no coincide con la patente declarada (' + target.licensePlate + ').')
+        });
+
+        var info = status && status[0];
+        var last = info && info.dateTime ? new Date(info.dateTime) : null;
+        if (!status) {
+            checks.push({ state: 'err', title: 'Comunicación', text: 'No se pudo consultar. Volvé a refrescar.' });
+        } else if (last && last >= start && info.isDeviceCommunicating) {
+            checks.push({ state: 'ok', title: 'Comunicación', text: 'Comunicando. Último dato: ' + fmtDateTime(info.dateTime) + '.' });
+        } else if (last && last >= start) {
+            checks.push({ state: 'warn', title: 'Comunicación', text: 'Comunicó por última vez el ' + fmtDateTime(info.dateTime) + ' y ahora no está comunicando. Puede estar apagado: encendé el motor y refrescá.' });
+        } else {
+            checks.push({ state: 'pending', title: 'Comunicación', text: 'Sin comunicación desde la instalación' + (last ? ' (último dato: ' + fmtDateTime(info.dateTime) + ')' : '') + '. Encendé el motor, esperá unos minutos y refrescá.' });
+        }
+
+        checks.push(logs === null ?
+            { state: 'err', title: 'Posición GPS', text: 'No se pudo consultar. Volvé a refrescar.' } :
+            hasRealData(logs, start) ?
+                { state: 'ok', title: 'Posición GPS', text: 'Se recibieron posiciones desde la instalación.' } :
+                { state: 'pending', title: 'Posición GPS', text: 'Sin posiciones desde la instalación. Probá con el vehículo a cielo abierto.' });
+
+        checks.push(engine === null ?
+            { state: 'err', title: 'Datos de motor', text: 'No se pudo consultar. Volvé a refrescar.' } :
+            hasRealData(engine, start) ?
+                { state: 'ok', title: 'Datos de motor', text: 'Se recibieron RPM desde la instalación.' } :
+                { state: 'pending', title: 'Datos de motor', text: 'Sin RPM desde la instalación. Probá con el motor en marcha; si sigue igual, revisá el arnés.' });
+
+        var engineVin = norm(device.engineVehicleIdentificationNumber);
+        if (target.chassis && engineVin.length >= 11) {
+            var same = engineVin === norm(target.chassis);
+            checks.push({
+                state: same ? 'ok' : 'warn', title: 'Chasis',
+                text: same ? 'El VIN leído del motor coincide con el declarado.' : 'El VIN leído del motor (' + engineVin + ') no coincide con el declarado (' + target.chassis + ').'
+            });
+        }
+        return checks;
+    }
+
+    function commHtml(checks, target) {
+        var label = { ok: 'Correcto', warn: 'Revisar', pending: 'Pendiente', err: 'Error' };
+        var allOk = checks.every(function (c) { return c.state === 'ok'; });
+        var camera = (target.replaced && target.replaced.camera ? target.replaced.camera.to : target.camera);
+        return '<div class="mv-msg mv-msg-' + (allOk ? 'ok' : 'warn') + '">' +
+            (allOk ? 'El equipo comunica correctamente.' : 'Todavía no se puede confirmar que el equipo comunique correctamente.') + '</div>' +
+            '<ul class="mv-checks">' + checks.map(function (c) {
+                return '<li><span class="mv-badge mv-state mv-state-' + c.state + '">' + label[c.state] + '</span>' +
+                    '<div><strong>' + esc(c.title) + '</strong>' + esc(c.text) + '</div></li>';
+            }).join('') + '</ul>' +
+            '<p class="mv-foot">Consultado: ' + esc(fmtDateTime(new Date().toISOString())) + '.' +
+            (camera ? ' No incluye el estado de la cámara.' : '') + '</p>';
     }
 
     // ------------------------------------------------------------------
@@ -693,10 +840,18 @@ geotab.addin.movimientos = function () {
         $('#mv-h-export').addEventListener('click', exportCsv);
         $('#mv-history').addEventListener('click', function (e) {
             var b = e.target.closest('[data-void]');
-            if (b) { openVoid(b.getAttribute('data-void')); }
+            if (b) { openVoid(b.getAttribute('data-void')); return; }
+            b = e.target.closest('[data-comm]');
+            if (b) {
+                var id = b.getAttribute('data-comm');
+                var r = records.filter(function (x) { return x.id === id; })[0];
+                if (r) { openComm(r.details); }
+            }
         });
         $('#mv-void').addEventListener('submit', submitVoid);
         $('#mv-void-cancel').addEventListener('click', closeVoid);
+        $('#mv-comm-refresh').addEventListener('click', refreshComm);
+        $('#mv-comm-close').addEventListener('click', closeComm);
     }
 
     // ------------------------------------------------------------------
@@ -725,6 +880,7 @@ geotab.addin.movimientos = function () {
         },
         blur: function () {
             closeVoid();
+            closeComm();
         }
     };
 };
