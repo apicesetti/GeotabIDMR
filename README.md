@@ -10,6 +10,10 @@ Solo escribe en `AddInData`: **no modifica vehículos ni equipos en Geotab**.
 
 Para otra URL de hosting: `python build.py URL_BASE`.
 
+## Permisos
+- Registrar y consultar: usuarios con acceso de escritura a datos de add-ins.
+- Anular: solo perfil **Administrador** de MyGeotab (`GroupEverythingSecurityId`). El control está en la interfaz del add-in; la API de MyGeotab no lo impone sobre `AddInData`.
+
 ## Modelo de datos (`AddInData`, `addInId = aOS_yCVsbRPiyLHnQhiSteg`)
 Un registro por movimiento, `details.type = "movimiento"`:
 

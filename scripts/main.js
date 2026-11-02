@@ -13,9 +13,11 @@ geotab.addin.movimientos = function () {
     var TYPE_LABEL = { instalacion: 'Instalación', desinstalacion: 'Desinstalación', reemplazo: 'Reemplazo' };
     var REMOVED_LABEL = { go: 'Equipo GO', go_camara: 'Equipo GO y cámara', camara: 'Solo cámara' };
     var MAX_KM = 9999999;
+    var ADMIN_SECURITY_ID = 'GroupEverythingSecurityId';
 
     var api, root;
     var userName = '';
+    var isAdmin = false;        // perfil Administrador: único que puede anular
     var devices = [];
     var records = [];
     var selected = null;        // vehículo elegido en Desinstalación / Reemplazo
@@ -121,7 +123,8 @@ geotab.addin.movimientos = function () {
                 typeName: 'Device',
                 propertySelector: { fields: ['id', 'name', 'serialNumber', 'licensePlate', 'vehicleIdentificationNumber', 'activeTo'] }
             }),
-            call('Get', { typeName: 'AddInData', search: { addInId: ADDIN_ID } })
+            call('Get', { typeName: 'AddInData', search: { addInId: ADDIN_ID } }),
+            loadAdmin()
         ]).then(function (res) {
             if (token !== loadToken) { return; }
             devices = res[0] || [];
@@ -130,6 +133,17 @@ geotab.addin.movimientos = function () {
             if (selected) { renderVehicle(); }
         }).catch(function (e) {
             showMsg('No se pudieron cargar los datos: ' + errText(e), 'err');
+        });
+    }
+
+    /** Ante cualquier duda (error de API, usuario sin datos) no da permiso. */
+    function loadAdmin() {
+        if (!userName) { isAdmin = false; return Promise.resolve(); }
+        return call('Get', { typeName: 'User', search: { name: userName } }).then(function (list) {
+            var user = list && list[0];
+            isAdmin = !!user && (user.securityGroups || []).some(function (g) { return g.id === ADMIN_SECURITY_ID; });
+        }).catch(function () {
+            isAdmin = false;
         });
     }
 
@@ -551,7 +565,7 @@ geotab.addin.movimientos = function () {
                 (d.voided ? '<br>Anulado por ' + esc(d.voidedBy) + ': ' + esc(d.voidReason) : '') + '</td>' +
                 '<td style="white-space:nowrap">' + esc(fmtKm(d.odometerKm)) + '</td>' +
                 '<td>' + esc(d.createdBy) + '<br><span class="mv-muted">' + esc(fmtDateTime(d.createdAt)) + '</span></td>' +
-                '<td>' + (d.voided ? '' : '<button type="button" class="mv-btn-link" data-void="' + esc(r.id) + '">Anular</button>') + '</td>' +
+                '<td>' + (d.voided || !isAdmin ? '' : '<button type="button" class="mv-btn-link" data-void="' + esc(r.id) + '">Anular</button>') + '</td>' +
                 '</tr>';
         }).join('');
         $('#mv-history-empty').hidden = rows.length > 0;
@@ -588,6 +602,7 @@ geotab.addin.movimientos = function () {
     // Anular
     // ------------------------------------------------------------------
     function openVoid(id) {
+        if (!isAdmin) { return; }
         voidTarget = records.filter(function (r) { return r.id === id; })[0] || null;
         if (!voidTarget) { return; }
         var d = voidTarget.details, f = $('#mv-void');
@@ -604,7 +619,7 @@ geotab.addin.movimientos = function () {
     }
     function submitVoid(e) {
         e.preventDefault();
-        if (saving || !voidTarget) { return; }
+        if (saving || !voidTarget || !isAdmin) { return; }
         var f = e.target, reason = f.elements.reason.value.trim();
         clearErrors(f);
         if (!reason) { fieldError(f, 'reason', 'Indicá el motivo.'); return; }
